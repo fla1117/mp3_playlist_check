@@ -4,6 +4,34 @@
 
 ---
 
+## [v0.3.1] - 2026-10-20
+### Refactored & Modularized
+- **Zero Test Modification 원칙 준수 대규모 모듈화 리팩토링 (43/43 테스트 100% 통과)**:
+  - **1. 스캐너 이미지 유틸리티 분리 (`src/scanner/image_utils.py`)**:
+    - `src/scanner/tag_extractor.py`에 혼재되어 있던 바이너리 이미지 헤더 파싱(`_parse_image_dimensions`, JPEG/PNG/GIF/WEBP) 및 디렉터리 내 외부 커버아트 탐색 로직(`_find_external_cover`)을 별도 유틸 모듈로 독립 분리.
+  - **2. 매처 엔진 및 유사도 산출 모듈화 (`src/matcher/`)**:
+    - `src/matcher/models.py`: 매칭 열거형(`MatchStatus`) 및 판별 결과 데이터클래스(`MatchResult`) 전용 모델 모듈 분리.
+    - `src/matcher/similarity.py`: 포맷 가중치(`FORMAT_QUALITY_WEIGHTS`), 재생시간 점수(`calculate_duration_score`), 제목 일치율(`calculate_title_score`), 아티스트 일치율(`calculate_artist_score`), 종합 점수 평가 로직(`evaluate_candidate`, `get_match_status`) 모듈화.
+    - `src/matcher/scorer.py`: `MatcherEngine` 오케스트레이션 클래스 중심 경량화 및 하위 호환성 re-export 유지.
+  - **3. 데이터베이스 리포지토리 믹스인 패턴 분리 (`src/db/`)**:
+    - `src/db/seed_data.py`: 기본 아티스트 별칭 시드 데이터(`DEFAULT_ARTIST_ALIASES`, `DEFAULT_SEEDS`) 독립.
+    - `src/db/track_ops.py`: 트랙 CRUD, 경로 이동 감지, FTS5 하이브리드 후보 검색, 스캔 에러 로깅, 라이브러리 통계 연산(`TrackOpsMixin`).
+    - `src/db/audit_ops.py`: 커버아트/메타데이터 결측 감사, Union-Find 기반 고급 중복 그룹 클러스터링 및 6단계 음질 우선 정렬(`AuditOpsMixin`).
+    - `src/db/alias_cache_ops.py`: $O(1)$ 아티스트 별칭 인메모리 캐시, 대표 아티스트 정규화, YouTube 메타데이터 캐시(`AliasCacheOpsMixin`).
+    - `src/db/repository.py`: 위 세 믹스인을 다중 상속하는 70줄 규모의 슬림한 `Repository` 클래스로 전면 재구성.
+  - **4. 모놀리식 GUI 패키지화 (`src/gui.py` → `src/gui/` 패키지)**:
+    - 1,944줄의 거대 단일 파일 `src/gui.py`를 삭제하고 책임별 믹스인 패키지로 전면 분할:
+      - `src/gui/theme_and_ime.py`: 팔레트 색상 상수, `ThemeMixin`, `get_entry_text_with_ime`, `open_in_explorer`, 포맷팅 헬퍼.
+      - `src/gui/tab_youtube.py`: YouTube 단일/모음집/챕터 판별, CSV 내보내기, 클립보드 복사(`YouTubeTabMixin`).
+      - `src/gui/tab_library.py`: 로컬 폴더 스캔, 한글 IME 실시간 검색, 라이브러리 브라우저(`LibraryTabMixin`).
+      - `src/gui/tab_audit.py`: 커버/태그/중복/오류 감사 테이블, 안전 삭제 가드, 커버아트 자동 수집/내장, 표준 리네임(`AuditTabMixin`).
+      - `src/gui/tab_aliases.py`: 아티스트 별칭 사전 CRUD 트리뷰(`AliasesTabMixin`).
+      - `src/gui/app.py`: `MusicCheckerGUI` 메인 윈도우 클래스 및 `main()` 진입점.
+      - `src/gui/__init__.py`: 패키지 re-export (`MusicCheckerGUI`, `main`, `get_entry_text_with_ime`, `open_in_explorer`).
+      - `src/gui/__main__.py`: `python -m src.gui` (`run_gui.bat`) 명령줄 패키지 직접 실행 지원.
+
+---
+
 ## [v0.3.0] - 2026-10-20
 ### Added & Improved
 - **1. 중복 음원 정밀 클러스터링 및 지능형 정리 (Union-Find & 안전 삭제)**:
