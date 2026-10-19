@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mp3_playlist_check"
+version = "0.1.0"
+description = "Local audio library to YouTube music matching & playlist checker"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mutagen>=1.47.0",
+    "yt-dlp>=2024.0.0",
+    "rapidfuzz>=3.0.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "chardet>=5.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+mp3-check = "src.cli:app"
+mp3-check-gui = "src.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
