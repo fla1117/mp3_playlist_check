@@ -10,12 +10,17 @@ Covers:
 import csv
 import io
 import json
+import os
 from pathlib import Path
+import stat
+import struct
 from unittest.mock import MagicMock, patch
+import wave
 
 import pytest
 from mutagen.id3 import ID3, APIC, TIT2, TPE1
 from mutagen.mp3 import MP3
+from mutagen.wave import WAVE
 
 from src.db.repository import Repository
 from src.matcher.scorer import MatchStatus
@@ -54,6 +59,25 @@ def create_test_mp3(path: Path, title: str = "", artist: str = "", album: str = 
     if with_cover:
         audio.tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=JPEG_1X1_BYTES))
     audio.save()
+
+
+def create_dummy_wav(path: Path, title: str = "", artist: str = "") -> None:
+    """Create a minimal valid WAV file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "w") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(44100)
+        wav_file.writeframes(struct.pack("<h", 0) * 44100)
+
+    if title or artist:
+        audio = WAVE(str(path))
+        audio.add_tags()
+        if title:
+            audio.tags.add(TIT2(encoding=3, text=[title]))
+        if artist:
+            audio.tags.add(TPE1(encoding=3, text=[artist]))
+        audio.save()
 
 
 def test_sanitize_filename() -> None:
@@ -576,3 +600,101 @@ def test_csv_export_utf8_sig_compatibility() -> None:
     assert "아이유" in decoded_text
     assert "좋은 날" in decoded_text
     assert "NewJeans" in decoded_text
+
+
+def test_readonly_file_handling(tmp_path: Path) -> None:
+    """Verify that read-only files can have cover art embedded, tags updated, and be deleted."""
+    mp3_path = tmp_path / "readonly_track.mp3"
+    create_test_mp3(mp3_path, title="Old Title", artist="Old Artist", with_cover=False)
+
+    # 1. Set file to read-only (Windows FILE_ATTRIBUTE_READONLY)
+    os.chmod(mp3_path, stat.S_IREAD)
+    st = mp3_path.stat()
+    assert not (st.st_mode & stat.S_IWRITE)
+
+    # 2. Test embed_cover_art on read-only file
+    ok_cover = embed_cover_art(mp3_path, JPEG_1X1_BYTES, "image/jpeg")
+    assert ok_cover is True
+    cover_data = extract_cover_bytes_from_file(mp3_path)
+    assert cover_data is not None
+    assert cover_data[0] == JPEG_1X1_BYTES
+
+    # 3. Set file back to read-only and test apply_fallback_tags_to_file
+    os.chmod(mp3_path, stat.S_IREAD)
+    assert not (mp3_path.stat().st_mode & stat.S_IWRITE)
+
+    ok_tags = apply_fallback_tags_to_file(mp3_path, artist="New Artist", title="New Title", album="New Album")
+    assert ok_tags is True
+    audio = MP3(str(mp3_path))
+    assert audio.tags.get("TPE1").text[0] == "New Artist"
+    assert audio.tags.get("TIT2").text[0] == "New Title"
+
+    # 4. Set file back to read-only and test rename_file_standard
+    os.chmod(mp3_path, stat.S_IREAD)
+    assert not (mp3_path.stat().st_mode & stat.S_IWRITE)
+
+    renamed_p = rename_file_standard(mp3_path, "New Artist", "New Title")
+    assert renamed_p.exists()
+    assert renamed_p.name == "New Artist - New Title.mp3"
+
+    # 5. Set renamed file to read-only and verify deletion logic (ensure writable before unlink)
+    os.chmod(renamed_p, stat.S_IREAD)
+    assert not (renamed_p.stat().st_mode & stat.S_IWRITE)
+
+    st_del = renamed_p.stat()
+    if not (st_del.st_mode & stat.S_IWRITE):
+        os.chmod(renamed_p, stat.S_IWRITE | stat.S_IREAD)
+    renamed_p.unlink()
+    assert not renamed_p.exists()
+
+
+def test_misnamed_container_tag_apply_and_missing_tags_filter(tmp_path: Path) -> None:
+    """Verify tag application and missing tags filter update on misnamed audio container (.mp3 with WAV content)."""
+    db_file = tmp_path / "test_misnamed.db"
+    repo = Repository(db_file)
+
+    # 1. Create a WAV file disguised with .mp3 extension and no tags (filename fallback pattern)
+    misnamed_file = tmp_path / "NewJeans - Ditto.mp3"
+    create_dummy_wav(misnamed_file, title="", artist="")
+
+    # Verify initial container is WAV format (RIFF header)
+    initial_bytes = misnamed_file.read_bytes()
+    assert initial_bytes[:4] == b"RIFF"
+    assert initial_bytes[8:12] == b"WAVE"
+
+    # 2. Initial scan: sync_single_file records track with tag_source == 'FILENAME_FALLBACK'
+    sync_single_file(misnamed_file, repo)
+
+    missing_initial = repo.get_missing_tags()
+    assert len(missing_initial) == 1
+    assert missing_initial[0]["file_name"] == "NewJeans - Ditto.mp3"
+    assert missing_initial[0]["tag_source"] == "FILENAME_FALLBACK"
+    assert missing_initial[0]["artist"] == "NewJeans"
+    assert missing_initial[0]["title"] == "Ditto"
+
+    # 3. Apply fallback tags into the file
+    ok = apply_fallback_tags_to_file(misnamed_file, artist="NewJeans", title="Ditto")
+    assert ok is True
+
+    # 4. Verify RIFF header is intact (not overwritten or corrupted by raw ID3 header)
+    updated_bytes = misnamed_file.read_bytes()
+    assert updated_bytes[:4] == b"RIFF"
+    assert updated_bytes[8:12] == b"WAVE"
+
+    # Verify mutagen WAVE reads the newly added tags
+    wav_audio = WAVE(str(misnamed_file))
+    assert wav_audio.tags is not None
+    assert wav_audio.tags.get("TPE1").text[0] == "NewJeans"
+    assert wav_audio.tags.get("TIT2").text[0] == "Ditto"
+
+    # 5. Sync file again and verify tag_source == 'ID3' and excluded from get_missing_tags()
+    sync_single_file(misnamed_file, repo)
+
+    active_tracks = repo.get_all_active_tracks()
+    assert len(active_tracks) == 1
+    assert active_tracks[0]["tag_source"] == "ID3"
+
+    missing_after = repo.get_missing_tags()
+    assert len(missing_after) == 0
+
+

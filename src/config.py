@@ -6,6 +6,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_DB_PATH = DEFAULT_DATA_DIR / "music_library.db"
 SETTINGS_PATH = DEFAULT_DATA_DIR / "settings.json"
+OPERATION_LOG_PATH = DEFAULT_DATA_DIR / "operation_errors.log"
 
 # Audio formats
 SUPPORTED_EXTENSIONS = {".mp3", ".flac", ".m4a", ".wav", ".ogg", ".aac"}

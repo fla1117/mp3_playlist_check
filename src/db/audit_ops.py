@@ -31,9 +31,7 @@ class AuditOpsMixin:
                 WHERE is_missing = 0 AND (
                     artist IS NULL OR artist = '' OR
                     title IS NULL OR title = '' OR
-                    album IS NULL OR album = '' OR
-                    release_year IS NULL OR
-                    tag_source = 'FILENAME_FALLBACK'
+                    tag_source != 'ID3'
                 )
                 ORDER BY file_path
                 """

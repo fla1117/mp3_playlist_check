@@ -90,12 +90,14 @@ def format_cover_art(track: Dict[str, Any]) -> str:
 
 
 def open_in_explorer(file_path: Optional[str]) -> None:
-    """Open Windows Explorer with file selected."""
+    """Open Windows Explorer with file selected or parent directory opened."""
     if not file_path:
         return
     p = Path(file_path).resolve()
     if p.exists():
-        subprocess.run(["explorer", f"/select,{p}"])
+        subprocess.run(f'explorer.exe /select,"{p}"')
+    elif p.parent.exists():
+        subprocess.run(f'explorer.exe "{p.parent}"')
     else:
         messagebox.showwarning("파일 없음", f"파일을 찾을 수 없습니다:\n{p}")
 

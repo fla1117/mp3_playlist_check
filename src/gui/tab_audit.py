@@ -1,10 +1,14 @@
 """Tab 3: Quality Audit & Statistics UI and batch maintenance operations."""
+import os
+import stat
 import threading
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Dict, List, Optional, Set
 
+from src.config import OPERATION_LOG_PATH
 from src.db.repository import Repository
 from src.gui.theme_and_ime import format_cover_art, open_in_explorer
 from src.scanner.cover_manager import embed_cover_art, fetch_cover_art_auto
@@ -598,6 +602,7 @@ class AuditTabMixin:
 
         deleted_files = 0
         failed_files = 0
+        failed_samples: List[str] = []
         ids_to_delete: List[int] = []
 
         for t in target_tracks:
@@ -606,11 +611,32 @@ class AuditTabMixin:
                 try:
                     p = Path(fpath)
                     if p.exists():
+                        st = p.stat()
+                        if not (st.st_mode & stat.S_IWRITE):
+                            os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
                         p.unlink(missing_ok=True)
                     deleted_files += 1
                     ids_to_delete.append(t["id"])
-                except Exception:
+                except Exception as e:
                     failed_files += 1
+                    err_msg = f"{type(e).__name__}: {e}"
+                    # 1. Append to operation_errors.log
+                    try:
+                        OPERATION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        with open(OPERATION_LOG_PATH, "a", encoding="utf-8") as f:
+                            f.write(f"[{now_str}] [DELETE_ERROR] {fpath} -> {err_msg}\n")
+                    except Exception:
+                        pass
+
+                    # 2. Record to scan_errors in database
+                    try:
+                        self.repo.record_scan_error(fpath, f"[삭제 실패] {err_msg}")
+                    except Exception:
+                        pass
+
+                    if len(failed_samples) < 3:
+                        failed_samples.append(f"• {Path(fpath).name}: {err_msg}")
             else:
                 ids_to_delete.append(t["id"])
 
@@ -624,7 +650,10 @@ class AuditTabMixin:
 
         msg = f"{deleted_files}개의 중복 파일이 디스크 및 DB에서 정상적으로 삭제되었습니다."
         if failed_files > 0:
-            msg += f"\n(파일 사용 중 등으로 삭제 실패: {failed_files}건)"
+            msg += f"\n\n⚠️ 파일 삭제 실패: {failed_files}건"
+            if failed_samples:
+                msg += "\n[대표 실패 원인]\n" + "\n".join(failed_samples)
+            msg += f"\n\n상세 로그는 '{OPERATION_LOG_PATH.name}' 파일 및 상단 '⚠️ 스캔 오류 파일 목록' 탭에서 확인하실 수 있습니다."
         messagebox.showinfo("삭제 완료", msg)
 
     def _auto_fill_covers_for_checked(self) -> None:
@@ -642,17 +671,24 @@ class AuditTabMixin:
                 if not fpath or not Path(fpath).exists():
                     fail_cnt += 1
                     continue
-                res = fetch_cover_art_auto(t, all_tracks, repo=self.repo)
-                if res:
-                    cover_bytes, mime = res
-                    ok = embed_cover_art(fpath, cover_bytes, mime)
-                    if ok:
-                        sync_single_file(fpath, self.repo)
-                        success_cnt += 1
+                try:
+                    res = fetch_cover_art_auto(t, all_tracks, repo=self.repo)
+                    if res:
+                        cover_bytes, mime = res
+                        ok = embed_cover_art(fpath, cover_bytes, mime)
+                        if ok:
+                            sync_single_file(fpath, self.repo)
+                            success_cnt += 1
+                        else:
+                            fail_cnt += 1
                     else:
                         fail_cnt += 1
-                else:
+                except Exception as e:
                     fail_cnt += 1
+                    try:
+                        self.repo.record_scan_error(fpath, f"[커버 자동채우기 실패] {type(e).__name__}: {e}")
+                    except Exception:
+                        pass
 
             def on_done() -> None:
                 self._refresh_audit_stats()
@@ -699,12 +735,19 @@ class AuditTabMixin:
             for t in checked_tracks:
                 fpath = t.get("file_path")
                 if fpath and Path(fpath).exists():
-                    ok = embed_cover_art(fpath, img_bytes, mime)
-                    if ok:
-                        sync_single_file(fpath, self.repo)
-                        success_cnt += 1
-                    else:
+                    try:
+                        ok = embed_cover_art(fpath, img_bytes, mime)
+                        if ok:
+                            sync_single_file(fpath, self.repo)
+                            success_cnt += 1
+                        else:
+                            fail_cnt += 1
+                    except Exception as e:
                         fail_cnt += 1
+                        try:
+                            self.repo.record_scan_error(fpath, f"[커버 수동삽입 실패] {type(e).__name__}: {e}")
+                        except Exception:
+                            pass
                 else:
                     fail_cnt += 1
 
@@ -726,8 +769,8 @@ class AuditTabMixin:
             return
 
         if not messagebox.askyesno(
-            "태그 적용 확인",
-            f"선택한 {len(checked_tracks)}곡의 파일에 추론된 가수·곡명 메타데이터 태그(ID3/Vorbis)를 직접 기록하시겠습니까?",
+            "태그 자동 저장 확인",
+            f"선택한 {len(checked_tracks)}곡의 추론된 가수·제목 정보를 프로그램이 실제 음원 파일 태그(ID3/Vorbis/MP4)에 자동으로 일괄 저장할까요?",
         ):
             return
 
@@ -738,12 +781,27 @@ class AuditTabMixin:
             artist = t.get("artist") or ""
             title = t.get("title") or ""
             if fpath and Path(fpath).exists() and (artist or title):
-                ok = apply_fallback_tags_to_file(fpath, artist, title)
-                if ok:
-                    sync_single_file(fpath, self.repo)
-                    success_cnt += 1
-                else:
+                try:
+                    ok = apply_fallback_tags_to_file(fpath, artist, title)
+                    if ok:
+                        sync_single_file(fpath, self.repo)
+                        success_cnt += 1
+                    else:
+                        fail_cnt += 1
+                except Exception as e:
                     fail_cnt += 1
+                    err_msg = f"{type(e).__name__}: {e}"
+                    try:
+                        OPERATION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        with open(OPERATION_LOG_PATH, "a", encoding="utf-8") as f:
+                            f.write(f"[{now_str}] [TAG_SAVE_ERROR] {fpath} -> {err_msg}\n")
+                    except Exception:
+                        pass
+                    try:
+                        self.repo.record_scan_error(fpath, f"[태그 저장 실패] {err_msg}")
+                    except Exception:
+                        pass
             else:
                 fail_cnt += 1
 
@@ -751,10 +809,10 @@ class AuditTabMixin:
         self._load_audit_category()
         if hasattr(self, "_reload_library_table"):
             self._reload_library_table()  # type: ignore[attr-defined]
-        messagebox.showinfo(
-            "태그 저장 완료",
-            f"{len(checked_tracks)}곡 중 {success_cnt}곡의 실제 파일에 메타데이터 태그가 저장되었습니다.",
-        )
+        msg = f"{len(checked_tracks)}곡 중 {success_cnt}곡의 실제 파일에 메타데이터 태그가 저장되었습니다."
+        if fail_cnt > 0:
+            msg += f"\n(실패: {fail_cnt}곡 — 상세 원인은 ⚠️ 스캔 오류 파일 목록 탭 참조)"
+        messagebox.showinfo("태그 저장 완료", msg)
 
     def _rename_checked_files_to_standard(self) -> None:
         checked_tracks = [self._audit_row_meta[item_id] for item_id in self._audit_checked_items if item_id in self._audit_row_meta]

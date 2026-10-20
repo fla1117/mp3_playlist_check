@@ -1,6 +1,8 @@
 """Cover art extraction, auto-fetching, and embedding utilities."""
 import json
 import mimetypes
+import os
+import stat
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -9,7 +11,9 @@ from typing import Any, Dict, Optional, Tuple
 import mutagen
 from mutagen.flac import FLAC, Picture
 from mutagen.id3 import APIC, ID3, ID3NoHeaderError
+from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4, MP4Cover
+from mutagen.wave import WAVE
 
 
 def extract_cover_bytes_from_file(file_path: Path | str) -> Optional[Tuple[bytes, str]]:
@@ -20,7 +24,32 @@ def extract_cover_bytes_from_file(file_path: Path | str) -> Optional[Tuple[bytes
 
     ext = p.suffix.lower()
     try:
-        if ext == ".mp3":
+        audio = mutagen.File(str(p))
+
+        # 1. MP4 / M4A / AAC container
+        if isinstance(audio, MP4):
+            covrs = audio.get("covr", [])
+            if covrs:
+                c = covrs[0]
+                mime = "image/png" if getattr(c, "imageformat", None) == MP4Cover.FORMAT_PNG else "image/jpeg"
+                return bytes(c), mime
+
+        # 2. FLAC container
+        elif isinstance(audio, FLAC):
+            if audio.pictures:
+                pic = audio.pictures[0]
+                return pic.data, pic.mime or "image/jpeg"
+
+        # 3. WAVE container
+        elif isinstance(audio, WAVE):
+            if audio.tags:
+                for key in audio.tags:
+                    if key.startswith("APIC"):
+                        apic = audio.tags[key]
+                        return apic.data, apic.mime or "image/jpeg"
+
+        # 4. MP3 container
+        elif isinstance(audio, MP3) or (audio is None and ext == ".mp3") or ext == ".mp3":
             try:
                 tags = ID3(str(p))
                 for key in tags:
@@ -30,19 +59,28 @@ def extract_cover_bytes_from_file(file_path: Path | str) -> Optional[Tuple[bytes
             except ID3NoHeaderError:
                 return None
 
-        elif ext == ".flac":
-            audio = FLAC(str(p))
-            if audio.pictures:
-                pic = audio.pictures[0]
-                return pic.data, pic.mime or "image/jpeg"
-
+        # 5. Fallback based on extension
         elif ext in [".m4a", ".mp4", ".aac"]:
-            audio = MP4(str(p))
-            covrs = audio.get("covr", [])
+            m_audio = MP4(str(p))
+            covrs = m_audio.get("covr", [])
             if covrs:
                 c = covrs[0]
                 mime = "image/png" if getattr(c, "imageformat", None) == MP4Cover.FORMAT_PNG else "image/jpeg"
                 return bytes(c), mime
+
+        elif ext == ".flac":
+            f_audio = FLAC(str(p))
+            if f_audio.pictures:
+                pic = f_audio.pictures[0]
+                return pic.data, pic.mime or "image/jpeg"
+
+        elif ext == ".wav":
+            w_audio = WAVE(str(p))
+            if w_audio.tags:
+                for key in w_audio.tags:
+                    if key.startswith("APIC"):
+                        apic = w_audio.tags[key]
+                        return apic.data, apic.mime or "image/jpeg"
 
     except Exception:
         pass
@@ -51,14 +89,60 @@ def extract_cover_bytes_from_file(file_path: Path | str) -> Optional[Tuple[bytes
 
 
 def embed_cover_art(file_path: Path | str, image_bytes: bytes, mime_type: str = "image/jpeg") -> bool:
-    """Embed cover art image bytes into audio file tags (MP3, FLAC, M4A)."""
+    """Embed cover art image bytes into audio file tags (MP3, FLAC, M4A, WAVE)."""
     p = Path(file_path)
     if not p.exists() or not image_bytes:
         return False
 
+    try:
+        st = p.stat()
+        if not (st.st_mode & stat.S_IWRITE):
+            os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
+    except Exception:
+        pass
+
     ext = p.suffix.lower()
     try:
-        if ext == ".mp3":
+        audio = mutagen.File(str(p))
+
+        # 1. MP4 / M4A / AAC container
+        if isinstance(audio, MP4):
+            cov_fmt = MP4Cover.FORMAT_PNG if "png" in mime_type.lower() else MP4Cover.FORMAT_JPEG
+            audio["covr"] = [MP4Cover(image_bytes, imageformat=cov_fmt)]
+            audio.save()
+            return True
+
+        # 2. FLAC container
+        elif isinstance(audio, FLAC):
+            audio.clear_pictures()
+            pic = Picture()
+            pic.type = 3
+            pic.mime = mime_type
+            pic.desc = "Cover"
+            pic.data = image_bytes
+            audio.add_picture(pic)
+            audio.save()
+            return True
+
+        # 3. WAVE container (save into RIFF ID3 chunk, do NOT use raw ID3.save())
+        elif isinstance(audio, WAVE):
+            if audio.tags is None:
+                audio.add_tags()
+            audio.tags.delall("APIC")
+            audio.tags.add(
+                APIC(
+                    encoding=3,
+                    mime=mime_type,
+                    type=3,  # Front Cover
+                    desc="Cover",
+                    data=image_bytes,
+                )
+            )
+            audio.save()
+            return True
+
+        # 4. MP3 container (or fallback if audio is MP3/None with .mp3 extension)
+        elif isinstance(audio, MP3) or (audio is None and ext == ".mp3") or ext == ".mp3":
             try:
                 tags = ID3(str(p))
             except ID3NoHeaderError:
@@ -76,23 +160,41 @@ def embed_cover_art(file_path: Path | str, image_bytes: bytes, mime_type: str = 
             tags.save(str(p))
             return True
 
+        # 5. Fallback based on extension
+        elif ext in [".m4a", ".mp4", ".aac"]:
+            m_audio = MP4(str(p))
+            cov_fmt = MP4Cover.FORMAT_PNG if "png" in mime_type.lower() else MP4Cover.FORMAT_JPEG
+            m_audio["covr"] = [MP4Cover(image_bytes, imageformat=cov_fmt)]
+            m_audio.save()
+            return True
+
         elif ext == ".flac":
-            audio = FLAC(str(p))
-            audio.clear_pictures()
+            f_audio = FLAC(str(p))
+            f_audio.clear_pictures()
             pic = Picture()
             pic.type = 3
             pic.mime = mime_type
             pic.desc = "Cover"
             pic.data = image_bytes
-            audio.add_picture(pic)
-            audio.save()
+            f_audio.add_picture(pic)
+            f_audio.save()
             return True
 
-        elif ext in [".m4a", ".mp4", ".aac"]:
-            audio = MP4(str(p))
-            cov_fmt = MP4Cover.FORMAT_PNG if "png" in mime_type.lower() else MP4Cover.FORMAT_JPEG
-            audio["covr"] = [MP4Cover(image_bytes, imageformat=cov_fmt)]
-            audio.save()
+        elif ext == ".wav":
+            w_audio = WAVE(str(p))
+            if w_audio.tags is None:
+                w_audio.add_tags()
+            w_audio.tags.delall("APIC")
+            w_audio.tags.add(
+                APIC(
+                    encoding=3,
+                    mime=mime_type,
+                    type=3,
+                    desc="Cover",
+                    data=image_bytes,
+                )
+            )
+            w_audio.save()
             return True
 
     except Exception:

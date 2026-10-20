@@ -204,3 +204,50 @@ def test_run_gui_bat_crlf_and_ascii():
     crlf_count = raw_bytes.count(b"\r\n")
     lf_count = raw_bytes.count(b"\n")
     assert crlf_count == lf_count, "run_gui.bat contains standalone LF line endings without CR"
+
+
+def test_open_in_explorer_command_format(tmp_path):
+    """Verify open_in_explorer formats Windows explorer command as string to preserve unquoted /select, switch with spaces."""
+    from unittest.mock import patch
+    from src.gui.theme_and_ime import open_in_explorer
+
+    # 1. Existing file with spaces and Korean characters
+    spaced_dir = tmp_path / "2. 음악" / "교과서 가곡 모음집 part 2"
+    spaced_dir.mkdir(parents=True)
+    test_file = spaced_dir / "07-오디오트랙 07.mp3"
+    test_file.write_text("dummy audio", encoding="utf-8")
+
+    resolved_path = test_file.resolve()
+
+    with patch("subprocess.run") as mock_run:
+        open_in_explorer(str(test_file))
+        mock_run.assert_called_once()
+        called_cmd = mock_run.call_args[0][0]
+        assert isinstance(called_cmd, str), f"Expected string command, got: {type(called_cmd)}"
+        assert called_cmd == f'explorer.exe /select,"{resolved_path}"'
+        assert not called_cmd.startswith('explorer "/select,')
+        assert '/select,"' in called_cmd
+
+    # 2. Non-existent file but existing parent directory fallback
+    non_existent_file = spaced_dir / "08-오디오트랙 08.mp3"
+    resolved_parent = spaced_dir.resolve()
+
+    with patch("subprocess.run") as mock_run:
+        open_in_explorer(str(non_existent_file))
+        mock_run.assert_called_once()
+        called_cmd = mock_run.call_args[0][0]
+        assert isinstance(called_cmd, str)
+        assert called_cmd == f'explorer.exe "{resolved_parent}"'
+
+    # 3. Neither exists -> warning messagebox
+    with patch("tkinter.messagebox.showwarning") as mock_warn, patch("subprocess.run") as mock_run:
+        open_in_explorer(str(tmp_path / "nonexistent_dir" / "nonexistent.mp3"))
+        mock_warn.assert_called_once()
+        mock_run.assert_not_called()
+
+    # 4. None or empty string -> no-op
+    with patch("subprocess.run") as mock_run:
+        open_in_explorer(None)
+        open_in_explorer("")
+        mock_run.assert_not_called()
+

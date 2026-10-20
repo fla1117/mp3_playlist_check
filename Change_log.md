@@ -4,6 +4,42 @@
 
 ---
 
+## [v0.3.3] - 2026-10-20
+### Fixed & Improved
+- **1. 확장자-컨테이너 불일치(Misnamed Container) 오디오 파일 태그/커버아트 안전 저장**:
+  - `src/scanner/tag_normalizer.py` 및 `src/scanner/cover_manager.py`: 확장자(`.mp3`)와 실제 내부 컨테이너 포맷(`WAVE`, `FLAC`, `MP4`/`M4A`)이 다른 파일도 확장자 기반 단순 분기 대신 `mutagen.File(str(p))` 컨테이너 인스턴스 검사를 최우선 수행하도록 개선.
+  - WAV 등 RIFF 기반 컨테이너 파일이 `.mp3`로 명명되어 있어도 파일 헤더 손상(RIFF 손상) 없이 RIFF ID3 청크에 태그와 앨범아트를 무손실 안전 기록.
+- **2. 태그 결측 목록(`get_missing_tags`) 필터 조건 정밀화 및 실시간 반영**:
+  - `src/db/audit_ops.py`: `get_missing_tags()`에서 `album IS NULL` / `release_year IS NULL` 조건을 제외하고 `tag_source != 'ID3'` 조건으로 간소화/정밀화.
+  - 추론된 메타데이터(가수/제목)를 파일 태그에 저장(`apply_fallback_tags_to_file`) 및 동기화(`sync_single_file`) 즉시 `tag_source`가 `ID3`로 승격되어 태그 결측 목록에서 실시간 제외되도록 개선.
+- **3. GUI 감사 탭 개별 파일 작업 예외 격리(Fault Tolerance)**:
+  - `src/gui/tab_audit.py`: `_apply_tags_to_checked_files()`, `_auto_fill_covers_for_checked()`, `_insert_local_image_for_checked()` 등 일괄 작업 시 개별 파일의 태그 기록이나 `sync_single_file()`을 `try...except`로 격리하여 단일 파일 실패 시에도 전체 프로세스가 중단되지 않도록 보호하고, 에러 로깅(`record_scan_error`, `operation_errors.log`) 연동.
+- **4. 단위 테스트 추가 (`tests/test_v030_features.py`)**:
+  - `test_misnamed_container_tag_apply_and_missing_tags_filter`: `.mp3` 확장자로 위장된 WAVE 파일의 초기 `FILENAME_FALLBACK` 감지, 태그 저장 후 RIFF 헤더 무손실 보존, `tag_source == 'ID3'` 승격 및 결측 목록 즉시 제외 라이프사이클 검증.
+- **5. 공백/특수문자 경로 Windows 탐색기 열기(`/select,`) 버그 수정**:
+  - `src/gui/theme_and_ime.py`: `open_in_explorer(file_path)` 호출 시 기존 리스트 인자(`["explorer", f"/select,{p}"]`)로 인해 공백 포함 경로에서 `subprocess.list2cmdline`이 `explorer "/select,C:\..."` 형태로 전체를 따옴표로 감싸 Windows 탐색기가 `/select` 스위치를 인식하지 못하고 `내 문서(C:\Users\user\Documents)`를 열던 문제를 문자열 커맨드(`f'explorer.exe /select,"{p}"'`)로 직접 전달하도록 수정.
+  - 파일이 존재하지 않더라도 상위 폴더(`p.parent`)가 존재하면 `subprocess.run(f'explorer.exe "{p.parent}"')`로 상위 폴더를 열도록 폴백 로직 개선.
+  - `tests/test_gui_and_cli.py`: 공백 및 한글 경로에 대한 `open_in_explorer` 커맨드 포맷 및 폴백 동작을 검증하는 단위 테스트 `test_open_in_explorer_command_format` 추가 (전체 46개 테스트 100% 통과).
+
+---
+
+## [v0.3.2] - 2026-10-20
+### Fixed & Improved
+- **Windows 읽기 전용(Read-Only, `FILE_ATTRIBUTE_READONLY`) 파일 처리 및 안전 삭제 권한 복구**:
+  - **읽기 전용 속성 자동 해제 (`os.chmod`)**: Windows 환경에서 읽기 전용 속성이 걸려 있어 `Path.unlink()` 및 태그 저장이 `PermissionError: [WinError 5]`로 차단되던 문제 해결.
+    - `src/gui/tab_audit.py`의 `_delete_selected_audit_files()`: `p.unlink()` 전 쓰기 권한 비트(`stat.S_IWRITE`) 확인 후 `os.chmod(p, stat.S_IWRITE | stat.S_IREAD)` 자동 적용.
+    - `src/scanner/cover_manager.py`의 `embed_cover_art()`: 태그/이미지 바이너리 기록 전 쓰기 권한 자동 확보.
+    - `src/scanner/tag_normalizer.py`의 `apply_fallback_tags_to_file()` 및 `rename_file_standard()`: 태그 저장 및 파일명 변경 전 쓰기 권한 자동 확보.
+  - **삭제 실패 시 상세 에러 로깅 및 UI 가시화**:
+    - `src/config.py`에 `OPERATION_LOG_PATH = DEFAULT_DATA_DIR / "operation_errors.log"` 상수 추가.
+    - 파일 삭제 중 예외 발생 시 `data/operation_errors.log`에 `[DELETE_ERROR] {fpath} -> {type(e).__name__}: {e}` 형식으로 타임스탬프와 함께 append 기록.
+    - `self.repo.record_scan_error` 동시 기록으로 GUI 탭 3의 `⚠️ 스캔 오류 파일 목록`에서도 실시간 확인 가능.
+    - 완료 메시지박스(`messagebox.showinfo`)에 실패 건수 발생 시 대표 실패 사유(최대 3건의 파일명 및 에러 메시지)와 로그 파일 안내 상세 표시.
+  - **단위 테스트 추가 (`tests/test_v030_features.py`)**:
+    - `test_readonly_file_handling`: 읽기 전용(`os.chmod(path, stat.S_IREAD)`) 파일에 대한 커버아트 임베딩, 폴백 태그 저장, 표준 리네임, 쓰기 권한 해제 후 삭제까지 전체 라이프사이클 검증 (전체 44개 테스트 100% 통과).
+
+---
+
 ## [v0.3.1] - 2026-10-20
 ### Refactored & Modularized
 - **Zero Test Modification 원칙 준수 대규모 모듈화 리팩토링 (43/43 테스트 100% 통과)**:
