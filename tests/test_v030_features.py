@@ -32,8 +32,11 @@ from src.scanner.cover_manager import (
 from src.scanner.file_walker import sync_single_file
 from src.scanner.tag_normalizer import (
     apply_fallback_tags_to_file,
+    batch_standardize_underscore_directory,
+    parse_underscore_filename,
     rename_file_standard,
     sanitize_filename,
+    standardize_underscore_filename,
 )
 
 # 1x1 minimal JPEG bytes
@@ -696,5 +699,98 @@ def test_misnamed_container_tag_apply_and_missing_tags_filter(tmp_path: Path) ->
 
     missing_after = repo.get_missing_tags()
     assert len(missing_after) == 0
+
+
+def test_underscore_filename_standardization(tmp_path: Path) -> None:
+    """Verify parsing, standardizing, collision avoidance, and batch directory rename of underscore filenames."""
+    # 1. Test parse_underscore_filename
+    assert parse_underscore_filename("BLACKPINK_불장난.mp3") == ("BLACKPINK", "불장난")
+    assert parse_underscore_filename("아이유_밤편지.flac") == ("아이유", "밤편지")
+    assert parse_underscore_filename("NewJeans_Hype Boy.m4a") == ("NewJeans", "Hype Boy")
+    assert parse_underscore_filename("Artist_Title") == ("Artist", "Title")
+    assert parse_underscore_filename(Path("C:/music/Artist_Title.wav")) == ("Artist", "Title")
+
+    # Invalid patterns
+    assert parse_underscore_filename("BLACKPINK - 불장난.mp3") is None
+    assert parse_underscore_filename("A_B_C.mp3") is None
+    assert parse_underscore_filename("_Title.mp3") is None
+    assert parse_underscore_filename("Artist_.mp3") is None
+    assert parse_underscore_filename("Artist_Title - Live.mp3") is None
+    assert parse_underscore_filename("NoUnderscore.mp3") is None
+    assert parse_underscore_filename("   _   .mp3") is None
+
+    # 2. Test standardize_underscore_filename with auto_tag
+    f1 = tmp_path / "BLACKPINK_불장난.mp3"
+    create_test_mp3(f1, title="", artist="")
+    new_path = standardize_underscore_filename(f1, auto_tag=True)
+    expected_path = tmp_path / "BLACKPINK - 불장난.mp3"
+    assert new_path == expected_path
+    assert expected_path.exists()
+    assert not f1.exists()
+
+    audio = MP3(str(expected_path))
+    assert audio.tags.get("TPE1").text[0] == "BLACKPINK"
+    assert audio.tags.get("TIT2").text[0] == "불장난"
+
+    # 3. Test collision handling (target already exists)
+    f2 = tmp_path / "BLACKPINK_불장난.mp3"
+    create_test_mp3(f2, title="", artist="")
+    collided_path = standardize_underscore_filename(f2, auto_tag=False)
+    expected_collision = tmp_path / "BLACKPINK - 불장난 (1).mp3"
+    assert collided_path == expected_collision
+    assert expected_collision.exists()
+    assert not f2.exists()
+
+    # 4. Test repo.get_nonstandard_naming_tracks and batch_standardize_underscore_directory
+    db_file = tmp_path / "test_naming.db"
+    repo = Repository(db_file)
+
+    music_dir = tmp_path / "music_batch"
+    music_dir.mkdir(parents=True, exist_ok=True)
+
+    file_iu = music_dir / "IU_Celebrity.mp3"
+    file_taeyeon = music_dir / "Taeyeon_INVU.mp3"
+    file_standard = music_dir / "Aespa - Next Level.mp3"
+    file_multi = music_dir / "Invalid_Multiple_Underscores.mp3"
+
+    create_test_mp3(file_iu)
+    create_test_mp3(file_taeyeon)
+    create_test_mp3(file_standard)
+    create_test_mp3(file_multi)
+
+    for f in [file_iu, file_taeyeon, file_standard, file_multi]:
+        sync_single_file(f, repo)
+
+    nonstandard = repo.get_nonstandard_naming_tracks()
+    assert len(nonstandard) == 2
+    matched_names = {r["file_name"] for r in nonstandard}
+    assert matched_names == {"IU_Celebrity.mp3", "Taeyeon_INVU.mp3"}
+
+    target_names = {r["target_name"] for r in nonstandard}
+    assert target_names == {"IU - Celebrity.mp3", "Taeyeon - INVU.mp3"}
+
+    # 5. Batch standardization
+    res = batch_standardize_underscore_directory(music_dir, repo=repo, auto_tag=True)
+    assert res["total_found"] == 2
+    assert res["renamed"] == 2
+    assert res["failed"] == 0
+    assert len(res["errors"]) == 0
+
+    assert (music_dir / "IU - Celebrity.mp3").exists()
+    assert (music_dir / "Taeyeon - INVU.mp3").exists()
+    assert not file_iu.exists()
+    assert not file_taeyeon.exists()
+    assert file_standard.exists()
+    assert file_multi.exists()
+
+    # Verify DB paths updated
+    active_names = {t["file_name"] for t in repo.get_all_active_tracks()}
+    assert "IU - Celebrity.mp3" in active_names
+    assert "Taeyeon - INVU.mp3" in active_names
+    assert "IU_Celebrity.mp3" not in active_names
+
+    # Verify no nonstandard naming tracks remaining
+    assert len(repo.get_nonstandard_naming_tracks()) == 0
+
 
 

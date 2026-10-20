@@ -170,6 +170,12 @@ def test_gui_headless_initialization(tmp_path):
     assert gui_module.get_entry_text_with_ime(gui_app.lib_search_entry) == "한글테스트"
     gui_app.lib_search_entry.delete(0, tk.END)
 
+    # Verify Tab 3 Naming category setup
+    gui_app.audit_cat_var.set("naming")
+    gui_app._load_audit_category()
+    assert tuple(gui_app.audit_tree["columns"]) == ("check", "current_name", "target_name", "artist", "title", "path")
+    assert gui_app.btn_standardize_naming["state"] == "disabled"
+
     # Verify _on_scan_finished triggers sync on library table and audit stats
     from unittest.mock import MagicMock
     from src.scanner.file_walker import ScanSummary
@@ -250,4 +256,22 @@ def test_open_in_explorer_command_format(tmp_path):
         open_in_explorer(None)
         open_in_explorer("")
         mock_run.assert_not_called()
+
+
+def test_cli_rename_underscore(tmp_path):
+    """Verify CLI rename-underscore command standardizes underscore filenames in a directory."""
+    music_dir = tmp_path / "My Spaced Music"
+    music_dir.mkdir(parents=True)
+
+    song1 = music_dir / "IU_Celebrity.mp3"
+    create_dummy_mp3(song1, title="", artist="")
+
+    # Run CLI command
+    result = runner.invoke(app, ["rename-underscore", str(music_dir)])
+    assert result.exit_code == 0
+    assert "언더스코어('_') 파일명 일괄 표준화 시작" in result.output
+    assert "IU - Celebrity.mp3" not in result.output or "변경 완료" in result.output
+    assert (music_dir / "IU - Celebrity.mp3").exists()
+    assert not song1.exists()
+
 

@@ -1,5 +1,6 @@
 """Database operations for library quality audit: missing covers, missing tags, and duplicates."""
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Set
 
 from src.matcher.normalizer import (
@@ -7,6 +8,7 @@ from src.matcher.normalizer import (
     extract_features,
     normalize_text,
 )
+from src.scanner.tag_normalizer import parse_underscore_filename
 
 
 class AuditOpsMixin:
@@ -39,6 +41,31 @@ class AuditOpsMixin:
             return [dict(r) for r in rows]
 
     get_missing_metadata_tracks = get_missing_tags
+
+    def get_nonstandard_naming_tracks(self) -> List[Dict[str, Any]]:
+        """Return active tracks with nonstandard underscore naming '[artist]_[title]'."""
+        with self.get_connection() as conn:  # type: ignore[attr-defined]
+            rows = conn.execute(
+                """
+                SELECT * FROM tracks
+                WHERE is_missing = 0 AND file_name LIKE '%_%' AND file_name NOT LIKE '% - %'
+                ORDER BY file_path
+                """
+            ).fetchall()
+
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            r = dict(row)
+            fname = r.get("file_name") or ""
+            parsed = parse_underscore_filename(fname)
+            if parsed:
+                artist, title = parsed
+                ext = Path(r["file_path"]).suffix if r.get("file_path") else Path(fname).suffix
+                r["parsed_artist"] = artist
+                r["parsed_title"] = title
+                r["target_name"] = f"{artist} - {title}{ext}"
+                results.append(r)
+        return results
 
     def get_duplicates(self) -> List[Dict[str, Any]]:
         """Return active tracks that are duplicates, with advanced alias and featuring resolution."""

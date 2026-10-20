@@ -3,7 +3,7 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import mutagen
 from mutagen.flac import FLAC
@@ -173,3 +173,117 @@ def rename_file_standard(file_path: Path | str, artist: str, title: str) -> Path
 
     p.rename(target_path)
     return target_path
+
+
+AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".wav", ".aac", ".ogg", ".wma"}
+
+
+def parse_underscore_filename(file_path_or_name: Path | str) -> Optional[tuple[str, str]]:
+    """Parse '[artist]_[title].[ext]' filename where stem contains exactly one underscore and no ' - '.
+
+    Returns (artist, title) tuple if valid, otherwise None.
+    """
+    stem = Path(file_path_or_name).stem
+    if stem.count("_") == 1 and " - " not in stem:
+        parts = stem.split("_")
+        artist = parts[0].strip()
+        title = parts[1].strip()
+        if artist and title:
+            return (artist, title)
+    return None
+
+
+def standardize_underscore_filename(file_path: Path | str, auto_tag: bool = False) -> Optional[Path]:
+    """Standardize an underscore-named file ('Artist_Title.ext') to standard 'Artist - Title.ext'.
+
+    Validates with parse_underscore_filename(file_path). If None, returns None.
+    Uses rename_file_standard(file_path, artist, title) which already handles Windows Read-Only attribute clearance and collision avoidance (1).
+    If auto_tag is True and the file exists, calls apply_fallback_tags_to_file(new_path, artist, title).
+    Returns new_path (Path object).
+    """
+    parsed = parse_underscore_filename(file_path)
+    if parsed is None:
+        return None
+
+    p = Path(file_path)
+    if not p.exists():
+        return None
+
+    artist, title = parsed
+    new_path = rename_file_standard(p, artist, title)
+    if auto_tag and new_path.exists():
+        apply_fallback_tags_to_file(new_path, artist, title)
+    return new_path
+
+
+def batch_standardize_underscore_directory(
+    dir_path: Path | str,
+    repo: Optional[Any] = None,
+    auto_tag: bool = False,
+    recursive: bool = False,
+) -> dict:
+    """Scan dir_path for audio files (.mp3, .flac, .m4a, .wav, .aac, .ogg, .wma) and rename underscore files.
+
+    For each file where parse_underscore_filename matches:
+      - Renames using standardize_underscore_filename.
+      - If repo is provided and the file was renamed:
+        - Calls repo.update_track_path(...).
+    Returns dict:
+      {"total_found": len(matched), "renamed": renamed_count, "failed": fail_count, "errors": errors_list, "renamed_files": [(str(old), str(new)), ...]}.
+    """
+    p = Path(dir_path)
+    if not p.exists() or not p.is_dir():
+        return {
+            "total_found": 0,
+            "renamed": 0,
+            "failed": 0,
+            "errors": [f"Directory not found: {dir_path}"],
+            "renamed_files": [],
+        }
+
+    if recursive:
+        files = [f for f in p.rglob("*") if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS]
+    else:
+        files = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS]
+
+    matched = [f for f in files if parse_underscore_filename(f) is not None]
+
+    renamed_count = 0
+    fail_count = 0
+    errors_list: list[str] = []
+    renamed_files: list[tuple[str, str]] = []
+
+    for f in matched:
+        old_path = f
+        try:
+            new_path = standardize_underscore_filename(old_path, auto_tag=auto_tag)
+            if new_path and new_path != old_path:
+                if repo is not None:
+                    try:
+                        st = new_path.stat()
+                        repo.update_track_path(
+                            old_path=str(old_path),
+                            new_path=str(new_path),
+                            new_name=new_path.name,
+                            new_ext=new_path.suffix.lstrip(".").lower(),
+                            mtime=st.st_mtime,
+                            file_size=st.st_size,
+                        )
+                    except Exception:
+                        pass
+                renamed_count += 1
+                renamed_files.append((str(old_path), str(new_path)))
+            else:
+                fail_count += 1
+                errors_list.append(f"Failed to rename: {old_path}")
+        except Exception as e:
+            fail_count += 1
+            errors_list.append(f"{old_path} -> {type(e).__name__}: {e}")
+
+    return {
+        "total_found": len(matched),
+        "renamed": renamed_count,
+        "failed": fail_count,
+        "errors": errors_list,
+        "renamed_files": renamed_files,
+    }

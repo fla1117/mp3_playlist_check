@@ -4,6 +4,27 @@
 
 ---
 
+## [v0.3.4] - 2026-10-20
+### Added & Improved
+- **1. 언더스코어('_') 비표준 파일명 파싱 및 표준화 엔진 구현 (`src/scanner/tag_normalizer.py`)**:
+  - `parse_underscore_filename(file_path_or_name)`: `[가수]_[제목].[확장자]` 형태(단일 언더스코어 포함 및 `" - "` 미포함)에서 아티스트와 타이틀을 정확히 분리 추출.
+  - `standardize_underscore_filename(file_path, auto_tag=False)`: Windows 읽기 전용(`stat.S_IWRITE`) 속성 자동 해제 및 기존 파일 중복 충돌 시 `(1)` 넘버링을 적용하여 `[가수] - [제목].[확장자]` 표준 명명 규칙으로 안전 변환. `auto_tag=True` 옵션 지정 시 실제 오디오 파일 메타데이터 태그도 동시 기록.
+  - `batch_standardize_underscore_directory(dir_path, repo, auto_tag, recursive)`: 지정 디렉터리 내 음원(`mp3`, `flac`, `m4a`, `wav`, `aac`, `ogg`, `wma`)을 일괄 스캔하여 비표준 언더스코어 파일명을 표준화하고 데이터베이스 경로 및 메타데이터 실시간 동기화.
+- **2. 비표준 파일명 데이터베이스 감사 쿼리 추가 (`src/db/audit_ops.py`)**:
+  - `get_nonstandard_naming_tracks()`: 활성 음원 중 파일명에 `_`가 포함되고 ` - `가 포함되지 않은 비표준 파일들을 조회하여 파싱된 가수/제목 및 변경 예정 파일명(`target_name`)을 포함한 감사 목록 제공.
+- **3. GUI 품질 감사 탭(Tab 3) '비표준 파일명 정리' 카테고리 연동 (`src/gui/tab_audit.py`)**:
+  - 감사 카테고리에 `📝 비표준 파일명 ('_') 정리` 탭 추가.
+  - 현재 파일명, 변경 예정 파일명, 가수, 제목, 파일 경로 테이블 뷰 제공.
+  - `✏️ 선택 파일 일괄 표준화 ('가수 - 제목')` 버튼: 선택된 항목에 대해 파일명 표준 변환, DB 경로 업데이트, 에러 로그(`operation_errors.log` 및 `record_scan_error`) 기록.
+  - `📂 외부 폴더 직접 선택하여 일괄 정리...` 버튼: DB 인덱싱 여부와 관계없이 로컬 음악 폴더를 직접 선택하여 즉시 일괄 표준화 실행 가능.
+- **4. CLI 일괄 표준화 커맨드 추가 (`src/cli.py`)**:
+  - `rename-underscore <directory> [--db <db_path>]`: 터미널 환경에서 대규모 음원 폴더를 한 번에 일괄 표준화하고 결과를 Rich Table로 요약 출력.
+- **5. 종합 단위/통합 테스트 추가 (`tests/test_v030_features.py`, `tests/test_gui_and_cli.py`)**:
+  - `test_underscore_filename_standardization`: 정상/비정상 파일명 파싱, 자동 태깅, 파일명 충돌 회피 `(1)`, 배치 폴더 일괄 표준화 및 DB 경로 동기화 검증.
+  - `test_cli_rename_underscore`: 공백 포함 경로에 대한 CLI `rename-underscore` 커맨드 정상 실행 검증 (전체 48개 테스트 100% 통과).
+
+---
+
 ## [v0.3.3] - 2026-10-20
 ### Fixed & Improved
 - **1. 확장자-컨테이너 불일치(Misnamed Container) 오디오 파일 태그/커버아트 안전 저장**:

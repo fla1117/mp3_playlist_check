@@ -13,7 +13,13 @@ from src.db.repository import Repository
 from src.gui.theme_and_ime import format_cover_art, open_in_explorer
 from src.scanner.cover_manager import embed_cover_art, fetch_cover_art_auto
 from src.scanner.file_walker import sync_single_file
-from src.scanner.tag_normalizer import apply_fallback_tags_to_file, rename_file_standard
+from src.scanner.tag_normalizer import (
+    apply_fallback_tags_to_file,
+    batch_standardize_underscore_directory,
+    parse_underscore_filename,
+    rename_file_standard,
+    standardize_underscore_filename,
+)
 
 
 class AuditTabMixin:
@@ -38,6 +44,8 @@ class AuditTabMixin:
     audit_frame_tags: ttk.Frame
     btn_apply_tags: tk.Button
     btn_rename_files: tk.Button
+    audit_frame_naming: ttk.Frame
+    btn_standardize_naming: tk.Button
     _audit_row_meta: Dict[str, Dict[str, Any]]
     _audit_checked_items: Set[str]
     repo: Repository
@@ -69,6 +77,7 @@ class AuditTabMixin:
         categories = [
             ("🖼️ 커버아트 누락 곡", "covers"),
             ("🏷️ 메타데이터 결측/추론 곡", "tags"),
+            ("📝 비표준 파일명 ('_') 정리", "naming"),
             ("👯 동일 곡 중복 보유 목록", "dups"),
             ("⚠️ 스캔 오류 파일 목록", "errors"),
         ]
@@ -238,6 +247,30 @@ class AuditTabMixin:
         )
         self.btn_rename_files.pack(side="left", padx=4)
 
+        # 4. Naming subframe
+        self.audit_frame_naming = ttk.Frame(self.audit_dynamic_frame)
+        self.btn_standardize_naming = tk.Button(
+            self.audit_frame_naming,
+            text="✏️ 선택 파일 일괄 표준화 ('가수 - 제목')",
+            bg="#dbeafe",
+            fg="#1e40af",
+            font=("Malgun Gothic", 9, "bold"),
+            command=self._standardize_checked_naming_files,
+            padx=10,
+            pady=4,
+            state="disabled",
+        )
+        self.btn_standardize_naming.pack(side="left", padx=(0, 6))
+
+        tk.Button(
+            self.audit_frame_naming,
+            text="📂 외부 폴더 직접 선택하여 일괄 정리...",
+            bg="#f3f4f6",
+            command=self._standardize_external_folder_dialog,
+            padx=10,
+            pady=4,
+        ).pack(side="left", padx=4)
+
         self._refresh_audit_stats()
         self._load_audit_category()
 
@@ -266,6 +299,7 @@ class AuditTabMixin:
         self.audit_frame_dups.pack_forget()
         self.audit_frame_covers.pack_forget()
         self.audit_frame_tags.pack_forget()
+        self.audit_frame_naming.pack_forget()
         self.btn_delete_dups.pack_forget()
 
         cat = self.audit_cat_var.get()
@@ -336,6 +370,40 @@ class AuditTabMixin:
                 )
                 self._audit_row_meta[item_id] = r
             self.audit_count_lbl.config(text=f"메타데이터 결측/추론 {len(rows):,}건")
+
+        elif cat == "naming":
+            self.audit_frame_naming.pack(side="left")
+            cols = ("check", "current_name", "target_name", "artist", "title", "path")
+            self.audit_tree.config(columns=cols)
+            self.audit_tree.heading("check", text="선택")
+            self.audit_tree.heading("current_name", text="현재 파일명")
+            self.audit_tree.heading("target_name", text="변경 예정 파일명")
+            self.audit_tree.heading("artist", text="가수")
+            self.audit_tree.heading("title", text="제목")
+            self.audit_tree.heading("path", text="파일 경로")
+            self.audit_tree.column("check", width=45, anchor="center")
+            self.audit_tree.column("current_name", width=240)
+            self.audit_tree.column("target_name", width=240)
+            self.audit_tree.column("artist", width=140)
+            self.audit_tree.column("title", width=180)
+            self.audit_tree.column("path", width=340)
+
+            rows = self.repo.get_nonstandard_naming_tracks()
+            for r in rows:
+                item_id = self.audit_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        "☐",
+                        r.get("file_name") or "",
+                        r.get("target_name") or "",
+                        r.get("parsed_artist") or r.get("artist") or "-",
+                        r.get("parsed_title") or r.get("title") or "-",
+                        r.get("file_path") or "",
+                    ),
+                )
+                self._audit_row_meta[item_id] = r
+            self.audit_count_lbl.config(text=f"비표준 파일명 ('_') {len(rows):,}건")
 
         elif cat == "dups":
             self.audit_frame_dups.pack(side="left")
@@ -500,6 +568,11 @@ class AuditTabMixin:
             )
             self.btn_rename_files.config(
                 text=f"✏️ 파일명을 '가수 - 제목' 형식으로 통일 ({cnt}건)" if cnt > 0 else "✏️ 파일명을 '가수 - 제목' 형식으로 통일",
+                state="normal" if cnt > 0 else "disabled",
+            )
+        elif cat == "naming":
+            self.btn_standardize_naming.config(
+                text=f"✏️ 선택 파일 일괄 표준화 ({cnt}건)" if cnt > 0 else "✏️ 선택 파일 일괄 표준화 ('가수 - 제목')",
                 state="normal" if cnt > 0 else "disabled",
             )
 
@@ -859,4 +932,106 @@ class AuditTabMixin:
         messagebox.showinfo(
             "파일명 통일 완료",
             f"{len(checked_tracks)}곡 중 {renamed_cnt}개 파일명이 표준 형식으로 변경되었습니다.",
+        )
+
+    def _standardize_checked_naming_files(self) -> None:
+        checked_tracks = [self._audit_row_meta[item_id] for item_id in self._audit_checked_items if item_id in self._audit_row_meta]
+        if not checked_tracks:
+            messagebox.showinfo("선택 필요", "표준화할 파일을 체크박스로 선택해 주세요.")
+            return
+
+        if not messagebox.askyesno(
+            "파일명 표준화 확인",
+            f"선택한 {len(checked_tracks)}개 파일의 이름을 '[가수] - [제목].[확장자]' 형식으로 일괄 변경하시겠습니까?",
+        ):
+            return
+
+        renamed_cnt = 0
+        fail_cnt = 0
+        for t in checked_tracks:
+            old_path = t.get("file_path")
+            if not old_path or not Path(old_path).exists():
+                fail_cnt += 1
+                continue
+
+            try:
+                new_path = standardize_underscore_filename(old_path)
+                if new_path and new_path != Path(old_path):
+                    st = new_path.stat()
+                    self.repo.update_track_path(
+                        old_path=str(old_path),
+                        new_path=str(new_path),
+                        new_name=new_path.name,
+                        new_ext=new_path.suffix.lstrip(".").lower(),
+                        mtime=st.st_mtime,
+                        file_size=st.st_size,
+                    )
+                    renamed_cnt += 1
+                else:
+                    fail_cnt += 1
+            except Exception as e:
+                fail_cnt += 1
+                err_msg = f"{type(e).__name__}: {e}"
+                try:
+                    with open(OPERATION_LOG_PATH, "a", encoding="utf-8") as lf:
+                        lf.write(f"[{datetime.now().isoformat()}] [RENAME_ERROR] {old_path} -> {err_msg}\n")
+                except Exception:
+                    pass
+                try:
+                    self.repo.record_scan_error(old_path, f"[파일명 표준화 실패] {err_msg}")
+                except Exception:
+                    pass
+
+        self._refresh_audit_stats()
+        self._load_audit_category()
+        if hasattr(self, "_reload_library_table"):
+            self._reload_library_table()  # type: ignore[attr-defined]
+
+        messagebox.showinfo(
+            "파일명 표준화 완료",
+            f"{len(checked_tracks)}개 중 {renamed_cnt}개 파일명이 표준 형식으로 변경되었습니다.",
+        )
+
+    def _standardize_external_folder_dialog(self) -> None:
+        folder = filedialog.askdirectory(title="일괄 파일명 표준화할 음악 폴더 선택")
+        if not folder:
+            return
+        folder_path = Path(folder)
+        if not folder_path.exists():
+            return
+
+        AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".wav", ".aac", ".ogg", ".wma"}
+        try:
+            candidates = [
+                f for f in folder_path.iterdir()
+                if f.is_file() and f.suffix.lower() in AUDIO_EXTS and parse_underscore_filename(f) is not None
+            ]
+        except Exception as e:
+            messagebox.showerror("오류", f"폴더를 읽는 도중 오류가 발생했습니다: {e}")
+            return
+
+        candidate_count = len(candidates)
+        if candidate_count == 0:
+            messagebox.showinfo(
+                "대상 없음",
+                f"선택한 폴더에 '가수_제목' 형식의 음원 파일이 없습니다.\n\n폴더: {folder}",
+            )
+            return
+
+        if not messagebox.askyesno(
+            "폴더 일괄 변경 확인",
+            f"선택한 폴더:\n{folder}\n\n폴더 내 {candidate_count}개의 '가수_제목' 형식 파일을 '[가수] - [제목]'으로 일괄 변경하시겠습니까?",
+        ):
+            return
+
+        result = batch_standardize_underscore_directory(folder_path, self.repo)
+
+        self._refresh_audit_stats()
+        self._load_audit_category()
+        if hasattr(self, "_reload_library_table"):
+            self._reload_library_table()  # type: ignore[attr-defined]
+
+        messagebox.showinfo(
+            "파일명 표준화 완료",
+            f"{result['renamed']}개 파일명 변경 완료 (오류: {result['failed']}건)",
         )

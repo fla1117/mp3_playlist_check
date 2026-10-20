@@ -19,6 +19,7 @@ from src.config import DEFAULT_DB_PATH
 from src.db.repository import Repository
 from src.matcher.scorer import MatcherEngine, MatchResult, MatchStatus
 from src.scanner.file_walker import scan_directory
+from src.scanner.tag_normalizer import batch_standardize_underscore_directory
 from src.youtube.extractor import YouTubeExtractor
 
 app = typer.Typer(help="Local audio library checker against YouTube music.")
@@ -328,6 +329,29 @@ def add_alias(
     repo = Repository(db or DEFAULT_DB_PATH)
     repo.add_alias(canonical, alias)
     console.print(f"[bold green]✅ 별칭 등록 완료:[/bold green] '{canonical}' ↔ '{alias}'")
+
+
+@app.command("rename-underscore")
+def rename_underscore_cmd(
+    directory: list[str] = typer.Argument(..., help="Path to audio directory to standardize"),
+    db: Optional[str] = typer.Option(None, "--db", help="Path to SQLite database file"),
+):
+    """Standardize audio filenames from '[artist]_[title]' to '[artist] - [title]'."""
+    target_path_str = " ".join(directory).strip()
+    target = Path(target_path_str)
+    if not target.exists():
+        console.print(f"[bold red]오류: 디렉토리가 존재하지 않습니다: {target}[/bold red]")
+        raise typer.Exit(code=1)
+    repo = Repository(db or DEFAULT_DB_PATH) if (db or DEFAULT_DB_PATH.exists()) else None
+    console.print(f"[bold cyan]📝 언더스코어('_') 파일명 일괄 표준화 시작:[/bold cyan] {target}")
+    result = batch_standardize_underscore_directory(target, repo)
+    table = Table(title="📊 파일명 표준화 결과", show_header=True, header_style="bold magenta")
+    table.add_column("항목", style="cyan")
+    table.add_column("건수", style="bold yellow", justify="right")
+    table.add_row("대상 파일 수", str(result["total_found"]))
+    table.add_row("변경 완료", f"[green]{result['renamed']}[/green]")
+    table.add_row("실패/오류", f"[red]{result['failed']}[/red]")
+    console.print(table)
 
 
 if __name__ == "__main__":
